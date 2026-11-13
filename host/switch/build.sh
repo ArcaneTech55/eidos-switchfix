@@ -29,7 +29,7 @@ case ${EIDOS_SWITCH_MEMCHECK:-guard} in
     bounds) MEMCHECK="-DWASM_RT_MEMCHECK_BOUNDS_CHECK=1 -DWASM_RT_USE_MMAP=0" ;;
     *) echo "EIDOS_SWITCH_MEMCHECK is guard or bounds"; exit 1 ;;
 esac
-COMMON="-O2 -pipe $ARCH -ffunction-sections -fdata-sections -D__SWITCH__ \
+COMMON="-O3 -DNDEBUG -pipe $ARCH -ffunction-sections -fdata-sections -D__SWITCH__ \
  -I$DEVKITPRO/libnx/include -I$PORT/include -fsigned-char \
  -DHOST_MEMORY_BUDGET_MB=${EIDOS_HOST_MEMORY_MB:-512} $MEMCHECK \
  -DWASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION=1 -DWASM_RT_SKIP_SIGNAL_RECOVERY=1 \
@@ -56,7 +56,9 @@ if [ "$(cat $OUT/game/flags.txt 2>/dev/null)" != "$COMMON" ]; then
 fi
 ls $SRC/game_*.c | xargs -P $JOBS -I{} sh -c '
   o=$OUT/game/$(basename {} .c).o
-  [ $o -nt {} ] || $DKA-gcc $COMMON -c {} -o $o || echo "FAIL {}"'
+  if [ ! "$o" -nt "{}" ]; then
+    $DKA-gcc $COMMON -c "{}" -o "$o" || { rm -f "$o"; exit 1; }
+  fi'
 echo "game: $(( $(date +%s) - start )) s"
 
 # 3. the runtime, the host and the layer

@@ -209,11 +209,17 @@ void w2c_env_glReadPixels(struct w2c_env *env, u32 x, u32 y, u32 w, u32 h, u32 f
     }
     geti(0x88ED /* GL_PIXEL_PACK_BUFFER_BINDING */, &pack);
 #if defined(__SWITCH__)
-    /* The Switch: one read of many rows came back with only the first
-     * part of each row in the emulator (Ryubing, Mesa's nouveau driver),
-     * a read of one row whole: so a row at a time, into memory or into
-     * the bound pixel-pack buffer alike (docs/consoles.md). */
-    if (h > 1 && type == 0x1401 /* GL_UNSIGNED_BYTE */ && (format == 0x1908 /* GL_RGBA */ ||
+    /* Ryubing needs row reads to avoid truncated readbacks. Real hardware
+     * uses one transfer: issuing 192 driver calls per DS screen defeats
+     * the PBO path. Keep the emulator workaround explicitly opt-in. */
+    static int rows = -1;
+    if (rows < 0) {
+        const char *value = getenv("EIDOS_SWITCH_READPIXELS_ROWS");
+        rows = value != NULL && strcmp(value, "1") == 0;
+        fprintf(stderr, "eidos: Switch readback: %s\n",
+                rows ? "rows (emulator workaround)" : "bulk (hardware)");
+    }
+    if (rows && h > 1 && type == 0x1401 /* GL_UNSIGNED_BYTE */ && (format == 0x1908 /* GL_RGBA */ ||
         (format == 0x1907 /* GL_RGB */ && !host_gl_es))) {
         GLint align = 4;
         size_t row;

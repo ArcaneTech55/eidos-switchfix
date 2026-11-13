@@ -1,0 +1,104 @@
+name: Switch hardware build
+on:
+  push:
+    branches: [fix/switch-hardware-performance]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: switch-hardware-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  switch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      EIDOS_SDL_CACHE: ${{ github.workspace }}/.cache/sdl
+      EIDOS_WASM_CACHE: ${{ github.workspace }}/.cache/wasm
+      EIDOS_WAMR_CACHE: ${{ github.workspace }}/.cache/wamr
+      EIDOS_MBEDTLS_CACHE: ${{ github.workspace }}/.cache/mbedtls
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read upstream source pin and version
+        id: meta
+        shell: bash
+        run: |
+          pin=$(sed -n 's/^set(EIDOS_ALETHEIA_PIN "\([0-9a-f]*\)").*/\1/p' cmake/aletheia_pin.cmake)
+          version=$(sed -n 's/^project(eidos VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          test -n "$pin" && test -n "$version"
+          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: Project-Holon/aletheia
+          ref: ${{ steps.meta.outputs.pin }}
+          path: aletheia
+      - name: Packages
+        run: sudo apt-get update && sudo apt-get install -y ninja-build gcc zip
+      - name: Regression checks
+        run: |
+          python3 tests/test_switch_readback.py
+          sh -n host/switch/build.sh
+      - uses: actions/cache@v4
+        with:
+          path: .cache
+          key: switch-tools-${{ runner.os }}-${{ hashFiles('tools/fetch_sdl.py', 'tools/fetch_wasm.py', 'tools/fetch_wamr.py', 'tools/fetch_mbedtls.py') }}
+      - name: Fetch pinned build dependencies
+        run: |
+          python3 tools/fetch_sdl.py --flavor mingw
+          python3 tools/fetch_wasm.py
+          python3 tools/fetch_wamr.py
+          python3 tools/fetch_mbedtls.py
+          python3 tools/package_release.py placeholders --aletheia-root aletheia
+      - name: Build the game module and generate ARM64 inputs
+        shell: bash
+        run: |
+          eval "$(python3 tools/fetch_wasm.py --locate)"
+          sdl=$(python3 tools/fetch_sdl.py --locate mingw)
+          wamr=$(python3 tools/fetch_wamr.py | tail -1)
+          mbedtls=$(python3 tools/fetch_mbedtls.py | tail -1)
+          cmake -S . -B build-module -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$WASI_SDK_PREFIX/share/cmake/wasi-sdk-p1.cmake" \
+            -DWASI_SDK_PREFIX="$WASI_SDK_PREFIX" \
+            -DCMAKE_C_FLAGS="-O2 -fno-strict-aliasing -fwrapv -fno-delete-null-pointer-checks -D_GNU_SOURCE" \
+            -DEIDOS_BOOT=ON -DEIDOS_BOOT_ALL_GAME=ON -DEIDOS_OVERLAYS=ALL \
+            -DEIDOS_TLS=ON -DEIDOS_WASM=ON -DEIDOS_RELEASE=ON -DEIDOS_SDL_FETCH=ON \
+            -DEIDOS_WAMR_ROOT="$wamr" -DEIDOS_MBEDTLS_ROOT="$mbedtls" \
+            -DALETHEIA_ROOT="$PWD/aletheia" -DBW_DATA_ROOT="$PWD/no-game-data/extract/data"
+          cmake --build build-module --target eidos_boot --parallel 4
+          cmake -S host -B build-switch -G Ninja \
+            -DEIDOS_WASM_MODULE="$PWD/build-module/eidos_boot.wasm" \
+            -DWABT_ROOT="$WABT_ROOT" -DWASM2C="$WASM2C" -DWASM_OPT="$WASM_OPT" \
+            -DSDL3_PREFIX="$sdl" -DEIDOS_HOST_BOUNDS_CHECKS=ON -DEIDOS_HOST_PARTS=96
+          ninja -C build-switch game.h gl_imports.c
+          echo "WABT_ROOT=$WABT_ROOT" >> "$GITHUB_ENV"
+          echo "SDL3_INCLUDE=$sdl/include" >> "$GITHUB_ENV"
+      - name: Compile eidos.nro for Tegra X1
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e JOBS=4 \
+            -e EIDOS_VERSION="${{ steps.meta.outputs.version }}" \
+            devkitpro/devkita64:latest \
+            sh host/switch/build.sh "$PWD/build-switch" "$WABT_ROOT" "$SDL3_INCLUDE" "$PWD/out"
+      - name: Package Switch build
+        run: |
+          mkdir -p dist stage/switch/eidos
+          cp out/eidos.nro stage/switch/eidos/
+          cp docs/switch-hardware-performance.md stage/switch/eidos/README-performance.md
+          (cd stage && zip -qr "../dist/eidos-${{ steps.meta.outputs.version }}-switch.zip" switch)
+          cp out/eidos.nro dist/
+          sha256sum dist/* > dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eidos-switch
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: switch-build-diagnostics
+          path: |
+            out/link.log
+            out/eidos.map
+            out/game/flags.txt
+          if-no-files-found: ignore
