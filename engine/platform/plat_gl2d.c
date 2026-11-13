@@ -299,7 +299,9 @@ static const char *k_fs2d =
     "}\n";
 
 typedef struct Gl2d {
-    GLuint prog, vao, fbo, out, vram[2], pal, obj, l3, rast;
+    GLuint prog, vao, fbo, out, vram[2], pal[2], obj, l3, rast;
+    u8 palette_bytes[2][18 * 256 * 3];
+    int palette_valid[2];
     const void *vram_from[2];   /* the frame and the bytes each one holds   */
     u32 vram_gen[2];
     int vram_h[2];
@@ -366,7 +368,10 @@ static int gl2d_init(EidosGl *g)
     s->u_g3sz = g->glGetUniformLocation(s->prog, "g3sz");
     s->u_osz = g->glGetUniformLocation(s->prog, "osz");
     g->glGenVertexArrays(1, &s->vao);
-    s->pal = utex(GL_RGBA8UI, 256, 18);
+    s->pal[0] = utex(GL_RGBA8UI, 256, 18);
+    if (g->switch_performance) {
+        s->pal[1] = utex(GL_RGBA8UI, 256, 18);
+    }
     s->obj = utex(GL_RGBA8UI, 256, 192);
     s->l3 = utex(GL_RGBA8UI, 256, 192);
     s->rast = utex(GL_RGBA8UI, 256, 192 * 4);
@@ -424,7 +429,7 @@ int eidos_gl2d_compose(EidosGl *g, const G2dGpuFrame *f, unsigned char *readback
     static u8 pal[18 * 256 * 4];
     GLint ints[40];
     GLint vp[4];
-    int i, rows, v, same, g3, from2d;
+    int i, rows, v, same, g3, from2d, palette;
 
     if (f == NULL || !f->valid || gl2d_init(g) != 0) {
         return -1;
@@ -432,6 +437,7 @@ int eidos_gl2d_compose(EidosGl *g, const G2dGpuFrame *f, unsigned char *readback
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     rows = (int)((f->bgv_size + 1023u) / 1024u);
     v = f->screen & 1;          /* one BG window texture per screen */
+    palette = g->switch_performance ? v : 0;
     if (rows > s->vram_h[v]) {
         if (s->vram[v] != 0) {
             glDeleteTextures(1, &s->vram[v]);
@@ -455,13 +461,22 @@ int eidos_gl2d_compose(EidosGl *g, const G2dGpuFrame *f, unsigned char *readback
                         (GLsizei)(f->bgv_size % 1024u), 1, GL_RED_INTEGER, GL_UNSIGNED_BYTE,
                         f->bgv + (f->bgv_size / 1024u) * 1024u);
     }
-    for (i = 0; i < 18 * 256; i++) {
-        pal[i * 4 + 0] = f->pal[i / 256][i % 256][0];
-        pal[i * 4 + 1] = f->pal[i / 256][i % 256][1];
-        pal[i * 4 + 2] = f->pal[i / 256][i % 256][2];
-        pal[i * 4 + 3] = 255;
+    /* Per-screen palettes are usually unchanged. Keep independent textures
+     * so presenting the other DS screen does not evict the cached palette. */
+    if (!g->switch_performance || !s->palette_valid[palette]
+        || memcmp(s->palette_bytes[palette], f->pal, sizeof f->pal) != 0) {
+        for (i = 0; i < 18 * 256; i++) {
+            pal[i * 4 + 0] = f->pal[i / 256][i % 256][0];
+            pal[i * 4 + 1] = f->pal[i / 256][i % 256][1];
+            pal[i * 4 + 2] = f->pal[i / 256][i % 256][2];
+            pal[i * 4 + 3] = 255;
+        }
+        upload(s->pal[palette], 256, 18, GL_RGBA_INTEGER, pal);
+        if (g->switch_performance) {
+            memcpy(s->palette_bytes[palette], f->pal, sizeof f->pal);
+            s->palette_valid[palette] = 1;
+        }
     }
-    upload(s->pal, 256, 18, GL_RGBA_INTEGER, pal);
     upload(s->obj, 256, 192, GL_RGBA_INTEGER, f->obj);
     /* phase 3: the screen whose 3D the GPU drew takes it from there */
     g3 = to_screen >= 0 && to_screen == g->s3d2 && f->l3_on && g->fb[0].color != 0 && g->fb[0].w > 0
@@ -482,7 +497,7 @@ int eidos_gl2d_compose(EidosGl *g, const G2dGpuFrame *f, unsigned char *readback
     g->glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, s->vram[v]);
     g->glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, s->pal);
+    glBindTexture(GL_TEXTURE_2D, s->pal[palette]);
     g->glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, s->obj);
     g->glActiveTexture(GL_TEXTURE3);

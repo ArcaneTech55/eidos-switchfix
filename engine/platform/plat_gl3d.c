@@ -1770,7 +1770,7 @@ static int render_into(EidosGl *g, GlFb *fb, const G3dSnapshot *s, int w, int h)
     int prev_depth_eq = -1, prev_mask = -1;
     GLfloat toon[96];
     unsigned long long t_up, t_dr;
-    int use_ms, edges, fog, backdrop;
+    int use_ms, edges, fog, backdrop, reuse_vertices;
     double cdepth;
 
     if (g == NULL || !g->have3d || s == NULL || w < 1 || h < 1) {
@@ -1833,6 +1833,13 @@ static int render_into(EidosGl *g, GlFb *fb, const G3dSnapshot *s, int w, int h)
 
     eidos_prof_end(EIDOS_PROF_GLUP, t_up);
     t_dr = eidos_prof_begin();
+    /* The Switch draws a snapshot at display and DS sizes. Its clip-space
+     * vertices do not depend on the target dimensions; expand/upload once. */
+    reuse_vertices = g->switch_performance && g->vtx_serial_valid
+                     && g->vtx_serial == s->serial;
+    if (reuse_vertices) {
+        nv = g->vtx_count;
+    } else {
     /* vertices: each polygon as a fan of triangles */
     need = (size_t)s->n_polys * 6u * FLOATS_PER_VERTEX;
     if (need > g->cap_vtx) {
@@ -1866,6 +1873,7 @@ static int render_into(EidosGl *g, GlFb *fb, const G3dSnapshot *s, int w, int h)
         }
     }
 
+    }
     /* Edge marking needs the ID buffer, which the multisampled target does
      * not carry; at a large size the resolution smooths the edges anyway. */
     edges = (s->disp3dcnt & 0x20u) != 0 && g->pedge != 0 && g->edge_mode != 0 &&
@@ -1938,9 +1946,14 @@ static int render_into(EidosGl *g, GlFb *fb, const G3dSnapshot *s, int w, int h)
 
         g->glBindVertexArray(g->vao3);
         g->glBindBuffer(GL_ARRAY_BUFFER, g->vbo3);
-        g->glBufferData(GL_ARRAY_BUFFER,
-                        (GLsizeiptr)((size_t)nv * FLOATS_PER_VERTEX * sizeof(float)),
-                        g->vtx, GL_STREAM_DRAW);
+        if (!reuse_vertices) {
+            g->glBufferData(GL_ARRAY_BUFFER,
+                            (GLsizeiptr)((size_t)nv * FLOATS_PER_VERTEX * sizeof(float)),
+                            g->vtx, GL_STREAM_DRAW);
+            g->vtx_serial = s->serial;
+            g->vtx_count = nv;
+            g->vtx_serial_valid = 1;
+        }
         g->glEnableVertexAttribArray(0);
         g->glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE,
                                  FLOATS_PER_VERTEX * sizeof(float), (void *)0);

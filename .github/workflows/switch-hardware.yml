@@ -38,6 +38,7 @@ jobs:
       - name: Regression checks
         run: |
           python3 tests/test_switch_readback.py
+          python3 tests/test_switch_runtime.py
           sh -n host/switch/build.sh
       - uses: actions/cache@v4
         with:

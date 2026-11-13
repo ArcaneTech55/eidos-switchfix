@@ -31,14 +31,26 @@
 
 #include "host.h"
 #include "wasm-rt.h"
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
 
 #define PAR_MAX_WORKERS 7
 #define PAR_QUEUE      256u
 #define PAR_STACK      (1u * 1024u * 1024u)        /* module stack per worker */
+#if defined(__SWITCH__)
+/* Horizon commits the entire stack; match the game's native fiber budget. */
+#define PAR_NATIVE     (4u * 1024u * 1024u)
+#else
 #define PAR_NATIVE     (16u * 1024u * 1024u)       /* native stack per worker */
+#endif
 
 typedef struct Worker {
     SDL_Thread *thread;
+#if defined(__SWITCH__)
+    int core;
+    u32 core_mask;
+#endif
     w2c_game inst;                  /* the copy this worker runs on        */
     wasm_rt_funcref_t *table;       /* its table, naming `inst`            */
 } Worker;
@@ -82,6 +94,13 @@ static int SDLCALL worker_main(void *arg)
 {
     Worker *w = (Worker *)arg;
 
+#if defined(__SWITCH__)
+    if (w->core_mask != 0) {
+        Result rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, w->core, w->core_mask);
+        fprintf(stderr, "eidos: worker %u preferred core %d mask 0x%x: 0x%x\n",
+                (unsigned)(w - g_w), w->core, (unsigned)w->core_mask, (unsigned)rc);
+    }
+#endif
     SDL_SetTLS(&g_self, w, NULL);
     wasm_rt_init_thread();
     for (;;) {
@@ -101,6 +120,23 @@ static void start(void)
     int cpus = SDL_GetNumLogicalCPUCores();
     int n = cpus > 1 ? cpus - 1 : 0, i;
     u32 k;
+#if defined(__SWITCH__)
+    u64 allowed = 0;
+    u32 worker_mask = 0;
+    if (R_SUCCEEDED(svcGetInfo(&allowed, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
+        unsigned core;
+        cpus = 0;
+        allowed &= 7u; /* only application cores, never Horizon's core 3 */
+        for (core = 0; core < 3; core++) {
+            cpus += (allowed >> core) & 1u;
+        }
+        n = cpus > 1 ? cpus - 1 : 0;
+        worker_mask = (u32)allowed & ~(1u << svcGetCurrentProcessorNumber());
+        if (worker_mask == 0) {
+            worker_mask = (u32)allowed;
+        }
+    }
+#endif
 
     if (getenv("EIDOS_PAR_WORKERS") != NULL) {
         n = atoi(getenv("EIDOS_PAR_WORKERS"));
@@ -123,6 +159,23 @@ static void start(void)
         if (stack == 0) {
             break;
         }
+#if defined(__SWITCH__)
+        {
+            unsigned core, count = 0, pick;
+            for (core = 0; core < 3; core++) {
+                count += (worker_mask >> core) & 1u;
+            }
+            pick = count != 0 ? (unsigned)i % count : 0;
+            w->core_mask = worker_mask;
+            w->core = 0;
+            for (core = 0; core < 3; core++) {
+                if ((worker_mask & (1u << core)) != 0 && pick-- == 0) {
+                    w->core = (int)core;
+                    break;
+                }
+            }
+        }
+#endif
         w->inst = g_game;
         w->table = (wasm_rt_funcref_t *)malloc(sizeof(*w->table) * g_game.w2c_T0.size);
         if (w->table == NULL) {

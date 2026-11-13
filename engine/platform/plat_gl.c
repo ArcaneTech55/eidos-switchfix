@@ -738,6 +738,10 @@ EidosGl *eidos_gl_create(SDL_Window *window)
         return NULL;
     }
     g->window = window;
+    {
+        const char *console = getenv("EIDOS_CONSOLE");
+        g->switch_performance = console != NULL && strcmp(console, "Switch") == 0;
+    }
     g->s3d = -1;
     g->s3d2 = -1;
     g->edge_mode = 0;           /* no outlines until the setting asks */

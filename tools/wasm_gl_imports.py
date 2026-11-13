@@ -377,7 +377,15 @@ void w2c_env_glColorMaski(struct w2c_env *env, u32 buf, u32 r, u32 g, u32 b, u32
 
 /* A mapped buffer: copied into module memory (the module's own malloc), and
  * back on unmap when it was mapped for writing. */
-static struct { u32 target, access, addr; void *host; GLint size; } g_map[4];
+static struct {
+    u32 target, access, addr;
+    void *host;
+    GLint size;
+#if defined(__SWITCH__)
+    u32 capacity;
+    int active;
+#endif
+} g_map[4];
 
 u32 w2c_env_glMapBuffer(struct w2c_env *env, u32 target, u32 access)
 {
@@ -411,6 +419,38 @@ u32 w2c_env_glMapBuffer(struct w2c_env *env, u32 target, u32 access)
     if (p == NULL) {
         return 0;
     }
+#if defined(__SWITCH__)
+    /* The module needs an address in its own memory, not a native pointer.
+     * Retain a bounded set of staging blocks across frames instead of
+     * locking the module heap for malloc/free on every PBO map. */
+    for (k = 0; k < 4 && g_map[k].active; k++) {
+    }
+    if (k == 4 || size <= 0) {
+        ((GLboolean (APIENTRY *)(GLenum))gl_proc("glUnmapBuffer"))(target);
+        return 0;
+    }
+    if (g_map[k].capacity < (u32)size) {
+        addr = host_malloc((u32)size);
+        if (addr == 0) {
+            ((GLboolean (APIENTRY *)(GLenum))gl_proc("glUnmapBuffer"))(target);
+            return 0;
+        }
+        if (g_map[k].addr != 0) {
+            host_free(g_map[k].addr);
+        }
+        g_map[k].addr = addr;
+        g_map[k].capacity = (u32)size;
+    }
+    addr = g_map[k].addr;
+    g_map[k].target = target;
+    g_map[k].access = access;
+    g_map[k].host = p;
+    g_map[k].size = size;
+    g_map[k].active = 1;
+    if (access != 0x88B9 /* GL_WRITE_ONLY */) {
+        memcpy(host_ptr(addr, (u32)size), p, (size_t)size);
+    }
+#else
     addr = host_malloc((u32)size);
     if (addr == 0) {
         return 0;
@@ -428,6 +468,7 @@ u32 w2c_env_glMapBuffer(struct w2c_env *env, u32 target, u32 access)
             break;
         }
     }
+#endif
     return addr;
 }
 
@@ -441,12 +482,20 @@ u32 w2c_env_glUnmapBuffer(struct w2c_env *env, u32 target)
         fn = (GLboolean (APIENTRY *)(GLenum))gl_proc("glUnmapBuffer");
     }
     for (k = 0; k < 4; k++) {
-        if (g_map[k].addr != 0 && g_map[k].target == target) {
+        if (g_map[k].addr != 0 && g_map[k].target == target
+#if defined(__SWITCH__)
+            && g_map[k].active
+#endif
+        ) {
             if (g_map[k].access != 0x88B8 /* GL_READ_ONLY */) {
                 memcpy(g_map[k].host, host_ptr(g_map[k].addr, (u32)g_map[k].size), (size_t)g_map[k].size);
             }
+#if defined(__SWITCH__)
+            g_map[k].active = 0;
+#else
             host_free(g_map[k].addr);
             g_map[k].addr = 0;
+#endif
             break;
         }
     }

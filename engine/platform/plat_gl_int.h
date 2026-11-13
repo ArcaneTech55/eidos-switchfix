@@ -97,6 +97,7 @@ struct EidosGl {
     EidosGpu base;              /* first: the backend's head (plat_gpu.h) */
     SDL_Window *window;
     SDL_GLContext ctx;
+    int switch_performance;       /* Switch host; desktop behavior stays unchanged */
 #define X(T, N) T N;
     GL_FUNCS(X)
     GL_FUNCS_OPT(X)
@@ -167,6 +168,8 @@ struct EidosGl {
     int tex_serial_valid;
     float *vtx;
     size_t cap_vtx;
+    unsigned vtx_serial, vtx_count;
+    int vtx_serial_valid;
 };
 
 /* plat_gl3d.c */

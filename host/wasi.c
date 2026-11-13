@@ -39,6 +39,7 @@
 #endif
 #if defined(__SWITCH__)
 #include <switch.h>
+#include "switch/read_cache.h"
 #endif
 
 /* errno values of WASI */
@@ -69,6 +70,10 @@ typedef struct {
     int native;                 /* a file's native descriptor               */
     char *path;                 /* a directory's full path ("" the root)    */
     int append;
+#if defined(__SWITCH__)
+    int read_ahead;
+    SwitchReadCache cache;
+#endif
 } Fd;
 
 static Fd g_fd[FDS_MAX];
@@ -552,6 +557,9 @@ u32 w2c_wasi__snapshot__preview1_fd_close(struct w2c_wasi__snapshot__preview1 *w
         close(g_fd[fd].native);
 #endif
     }
+#if defined(__SWITCH__)
+    switch_read_cache_free(&g_fd[fd].cache);
+#endif
     free(g_fd[fd].path);
     memset(&g_fd[fd], 0, sizeof(g_fd[fd]));
     return 0;
@@ -598,6 +606,11 @@ static long long io_rw_here(u32 fd, u32 iovs, u32 n, int wr, long long at)
 #if defined(_WIN32)
             r = wr ? _write(g_fd[fd].native, P(b), l) : _read(g_fd[fd].native, P(b), l);
 #else
+#if defined(__SWITCH__)
+            if (!wr && g_fd[fd].read_ahead) {
+                r = switch_read_cached(g_fd[fd].native, P(b), l, &g_fd[fd].cache);
+            } else
+#endif
             r = wr ? write(g_fd[fd].native, P(b), l) : read(g_fd[fd].native, P(b), l);
 #endif
         }
@@ -993,6 +1006,14 @@ u32 w2c_wasi__snapshot__preview1_path_open(struct w2c_wasi__snapshot__preview1 *
     }
     g_fd[fd].path = p;          /* kept for the Switch's rename report */
     g_fd[fd].native = nfd;
+#if defined(__SWITCH__)
+    {
+        const char *opt = getenv("EIDOS_SWITCH_READAHEAD");
+        g_fd[fd].read_ahead = (flags & O_ACCMODE) == O_RDONLY
+                             && strstr(p, "/extract/") != NULL
+                             && (opt == NULL || strcmp(opt, "0") != 0);
+    }
+#endif
     g_fd[fd].append = (fdflags & 1u) != 0;
     st32(out, (u32)fd);
     return 0;
